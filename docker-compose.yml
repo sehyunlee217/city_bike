@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:14.23-trixie
+    container_name: city-bike-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: city_bike
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5555:5432"
+    volumes:
+      - city_bike_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  city_bike_postgres_data:
