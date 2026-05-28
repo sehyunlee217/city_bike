@@ -1,6 +1,7 @@
 import os
 import psycopg
 import requests
+from psycopg.types.json import Jsonb
 
 STATION_INFORMATION_URL = (
     "https://tor.publicbikesystem.net/ube/gbfs/v1/en/station_information"
@@ -54,6 +55,30 @@ def create_stations_table(conn):
     conn.commit()
 
 
+def create_station_statuses_table(conn):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS station_statuses (
+                station_id TEXT PRIMARY KEY,
+                num_bikes_available INTEGER,
+                num_bikes_disabled INTEGER,
+                is_charging_station BOOLEAN,
+                status TEXT,
+                num_bikes_available_types JSONB,
+                num_docks_available INTEGER,
+                num_docks_disabled INTEGER,
+                last_reported BIGINT,
+                is_installed BOOLEAN,
+                is_renting BOOLEAN,
+                is_returning BOOLEAN,
+                updated_at TIMESTAMPTZ DEFAULT now()
+            );
+            """
+        )
+    conn.commit()
+
+
 def normalize_station(station):
     return {
         "station_id": station["station_id"],
@@ -72,6 +97,29 @@ def normalize_station(station):
         "short_name": station.get("short_name"),
         "nearby_distance": station.get("nearby_distance"),
         "_ride_code_support": station.get("_ride_code_support"),
+    }
+
+
+def normalize_gbfs_bool(value):
+    if value is None:
+        return None
+    return bool(value)
+
+
+def normalize_station_status(status):
+    return {
+        "station_id": status["station_id"],
+        "num_bikes_available": status.get("num_bikes_available"),
+        "num_bikes_disabled": status.get("num_bikes_disabled"),
+        "is_charging_station": status.get("is_charging_station"),
+        "status": status.get("status"),
+        "num_bikes_available_types": status.get("num_bikes_available_types", {}),
+        "num_docks_available": status.get("num_docks_available"),
+        "num_docks_disabled": status.get("num_docks_disabled"),
+        "last_reported": status.get("last_reported"),
+        "is_installed": normalize_gbfs_bool(status.get("is_installed")),
+        "is_renting": normalize_gbfs_bool(status.get("is_renting")),
+        "is_returning": normalize_gbfs_bool(status.get("is_returning")),
     }
 
 
@@ -140,7 +188,71 @@ def upsert_station(conn, station):
         )
 
 
+def upsert_station_status(conn, status):
+    status = normalize_station_status(status)
+    status["num_bikes_available_types"] = Jsonb(status["num_bikes_available_types"])
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO station_statuses (
+                station_id,
+                num_bikes_available,
+                num_bikes_disabled,
+                is_charging_station,
+                status,
+                num_bikes_available_types,
+                num_docks_available,
+                num_docks_disabled,
+                last_reported,
+                is_installed,
+                is_renting,
+                is_returning
+            )
+            VALUES (
+                %(station_id)s,
+                %(num_bikes_available)s,
+                %(num_bikes_disabled)s,
+                %(is_charging_station)s,
+                %(status)s,
+                %(num_bikes_available_types)s,
+                %(num_docks_available)s,
+                %(num_docks_disabled)s,
+                %(last_reported)s,
+                %(is_installed)s,
+                %(is_renting)s,
+                %(is_returning)s
+            )
+            ON CONFLICT (station_id)
+            DO UPDATE SET
+                num_bikes_available = EXCLUDED.num_bikes_available,
+                num_bikes_disabled = EXCLUDED.num_bikes_disabled,
+                is_charging_station = EXCLUDED.is_charging_station,
+                status = EXCLUDED.status,
+                num_bikes_available_types = EXCLUDED.num_bikes_available_types,
+                num_docks_available = EXCLUDED.num_docks_available,
+                num_docks_disabled = EXCLUDED.num_docks_disabled,
+                last_reported = EXCLUDED.last_reported,
+                is_installed = EXCLUDED.is_installed,
+                is_renting = EXCLUDED.is_renting,
+                is_returning = EXCLUDED.is_returning,
+                updated_at = now();
+            """,
+            status,
+        )
+
+
 def load_stations():
+    """
+    Load station information.
+    ======================================
+    station_id | 7013
+    name       | Scott St / The Esplanade
+    address    | Scott St / The Esplanade
+    capacity   | 19
+    lat        | 43.64659663170443
+    lon        | -79.37530913867988
+    """
     stations = fetch_station_information()
 
     with psycopg.connect(DATABASE_URL) as conn:
@@ -149,8 +261,38 @@ def load_stations():
             upsert_station(conn, station)
         conn.commit()
 
-    print(f"Loaded {len(stations)} stations into Postgres")
+    print(f"Loaded {len(stations)} stations into Postgres @ {DATABASE_URL}")
+
+
+def load_station_status():
+    """
+    Load station status.
+    ======================================
+    station_id                : 7013
+    num_bikes_available       : 22
+    num_bikes_disabled        : 2
+    is_charging_station       : false
+    status                    : "IN_SERVICE"
+    num_bikes_available_types : { mechanical: 21, ebike: 1 }
+    num_docks_available       : 23
+    num_docks_disabled        : 0
+    last_reported             : 1779936900
+    is_installed              : 1
+    is_renting                : 1
+    is_returning              : 1
+    """
+
+    statuses = fetch_station_status()
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        create_station_statuses_table(conn)
+        for status in statuses:
+            upsert_station_status(conn, status)
+        conn.commit()
+
+    print(f"Loaded {len(statuses)} station statuses into Postgres @ {DATABASE_URL}")
 
 
 if __name__ == "__main__":
     load_stations()
+    load_station_status()
